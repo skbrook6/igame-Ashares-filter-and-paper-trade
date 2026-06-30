@@ -1,0 +1,43 @@
+app:
+  mode: paper   # paper | qmt
+  database_path: data/trading.db
+  sample_data_path: data/sample_ohlcv.csv
+
+market_data:
+  # v5: 个人免费优先，TDX-only。AKShare/东方财富不再作为股票池依赖。
+  provider: tdx
+  fallback_to_sample: true
+
+  # selector_universe:
+  #   tdx    = 用通达信公开行情服务器生成真实 A 股股票池
+  #   sample = 用本地 sample_ohlcv.csv 生成模拟股票池
+  selector_universe: tdx
+  tdx_universe_cache_path: data/tdx_universe.csv
+  adjust: qfq   # qfq=前复权；raw=不复权
+
+  tdx:
+    # 你已测试可用的服务器。留空也会自动尝试内置服务器。
+    host: "180.153.18.170"
+    port: 7709
+    auto_retry: true
+
+paper_trading:
+  initial_cash: 1000000
+
+risk:
+  max_cash_per_stock: 20000
+  min_lot_size: 100
+  buy_price_buffer: 0.002
+  sell_price_buffer: -0.002
+  max_orders_per_day: 20
+  allow_market_order: false
+
+selector:
+  min_turnover: 50000000
+  min_price: 3
+  max_price: 80
+  top_n: 0
+
+schedule:
+  decision_start: "14:00"
+  auto_push_time: "14:55"
