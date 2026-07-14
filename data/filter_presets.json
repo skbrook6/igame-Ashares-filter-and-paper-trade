@@ -11,6 +11,8 @@
     "exclude_st": true,
     "excluded_prefix_labels": [],
     "use_shrink_volume": false,
+    "use_close_open_volume_max": true,
+    "close_open_volume_max_days": 5,
     "use_ema_filter": true,
     "ema_short_period": 20,
     "ema_mid_period": 50,
@@ -22,29 +24,5 @@
     "sort_by": "成交额从高到低",
     "force_refresh": true
   },
-  "presets": {
-    "50￥ 10% 缩量": {
-      "min_price": 3.0,
-      "max_price": 50.0,
-      "min_pct_chg": 0.0,
-      "max_pct_chg": 10.0,
-      "use_market_cap_filter": false,
-      "min_market_cap_e8": 20.0,
-      "max_market_cap_e8": 5000.0,
-      "exclude_limit_up": true,
-      "exclude_st": true,
-      "excluded_prefix_labels": [],
-      "use_shrink_volume": true,
-      "use_ema_filter": false,
-      "ema_short_period": 20,
-      "ema_mid_period": 50,
-      "ema_long_period": 100,
-      "ema_require_short_above_mid": true,
-      "ema_require_mid_above_long": true,
-      "ema_require_price_above_short": true,
-      "top_n": 0,
-      "sort_by": "成交额从高到低",
-      "force_refresh": true
-    }
-  }
+  "presets": {}
 }

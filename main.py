@@ -53,6 +53,8 @@ DEFAULT_FILTER_PARAMS = {
     "exclude_st": True,
     "excluded_prefix_labels": [],
     "use_shrink_volume": False,
+    "use_close_open_volume_max": False,
+    "close_open_volume_max_days": 30,
     "use_ema_filter": False,
     "ema_short_period": 20,
     "ema_mid_period": 50,
@@ -333,6 +335,23 @@ def filter_dialog():
         key=fk("use_shrink_volume"),
     )
 
+    st.markdown("**(Close-Open)/Volume 筛选**")
+    use_close_open_volume_max = st.checkbox(
+        "筛选最新日 (Close-Open)/Volume 局部最大值",
+        value=bool(p.get("use_close_open_volume_max", False)),
+        help="最新交易日的 (Close-Open)/Volume 大于或等于回看窗口内此前所有有效交易日时保留。",
+        key=fk("use_close_open_volume_max"),
+    )
+    close_open_volume_max_days = st.number_input(
+        "局部最大值回看交易日数",
+        min_value=2,
+        max_value=1000,
+        value=int(p.get("close_open_volume_max_days", 30)),
+        step=1,
+        disabled=not use_close_open_volume_max,
+        key=fk("close_open_volume_max_days"),
+    )
+
     st.markdown("**EMA / EXPMA 筛选**")
     use_ema_filter = st.checkbox(
         "启用 EMA 趋势筛选",
@@ -429,6 +448,8 @@ def filter_dialog():
         "exclude_st": exclude_st,
         "excluded_prefix_labels": excluded_prefix_labels,
         "use_shrink_volume": use_shrink_volume,
+        "use_close_open_volume_max": use_close_open_volume_max,
+        "close_open_volume_max_days": int(close_open_volume_max_days),
         "use_ema_filter": use_ema_filter,
         "ema_short_period": int(ema_short_period),
         "ema_mid_period": int(ema_mid_period),
@@ -469,8 +490,8 @@ def filter_dialog():
         excluded_prefixes = [BOARD_PREFIX_OPTIONS[x] for x in excluded_prefix_labels]
         st.session_state.filter_params = normalize_filter_params(current_filter_params)
         save_last_filter_params(current_filter_params)
-        if use_shrink_volume and int(top_n) <= 0:
-            st.warning("已开启缩量筛选且未限制最多股票数，可能需要几分钟。")
+        if (use_shrink_volume or use_close_open_volume_max) and int(top_n) <= 0:
+            st.warning("已开启需要逐只读取日 K 的筛选且未限制最多股票数，可能需要几分钟。")
         with st.spinner("正在生成待判断股票清单，请稍等..."):
             st.session_state.judge_pool = dp.filter_universe(
                 min_price=min_price,
@@ -485,6 +506,8 @@ def filter_dialog():
                 excluded_prefixes=excluded_prefixes,
                 use_shrink_volume=use_shrink_volume,
                 shrink_volume_ratio=shrink_ratio,
+                use_close_open_volume_max=use_close_open_volume_max,
+                close_open_volume_max_days=int(close_open_volume_max_days),
                 use_ema_filter=use_ema_filter,
                 ema_short_period=int(ema_short_period),
                 ema_mid_period=int(ema_mid_period),
@@ -597,7 +620,7 @@ def plot_kline(
     current_volume: float | None = None,
     estimated_close_volume: float | None = None,
 ):
-    """Draw price K-line and volume in two stacked panels.
+    """Draw price K-line, volume, MACD, and price-change-per-volume panels.
 
     v6 chart rules:
     - x axis is categorical so weekends / holidays do not create gaps.
@@ -633,11 +656,11 @@ def plot_kline(
         )
 
     fig = make_subplots(
-        rows=3,
+        rows=4,
         cols=1,
         shared_xaxes=True,
-        vertical_spacing=0.025,
-        row_heights=[0.56, 0.25, 0.19],  # K-line, volume, MACD
+        vertical_spacing=0.02,
+        row_heights=[0.48, 0.22, 0.16, 0.14],  # K-line, volume, MACD, (close-open)/volume
     )
 
     fig.add_trace(
@@ -817,6 +840,25 @@ def plot_kline(
             col=1,
         )
 
+    # Use the displayed volume for the latest bar as well, so the intraday
+    # ratio stays consistent with the volume panel. Zero volume has no ratio.
+    price_change_per_volume = (df_plot["close"] - df_plot["open"]) / solid_volume.where(solid_volume > 0)
+    fig.add_trace(
+        go.Bar(
+            x=df_plot["date_str"],
+            y=price_change_per_volume,
+            name="(Close-Open)/Volume",
+            marker=dict(color=candle_colors),
+            hovertemplate=(
+                "时间: %{x}<br>"
+                "(Close-Open)/Volume: %{y:.3e}"
+                "<extra></extra>"
+            ),
+        ),
+        row=4,
+        col=1,
+    )
+
     # B/S markers: show them on the price chart x-axis line only.
     if code:
         markers = trade_markers_for_code(str(code).zfill(6), df_plot)
@@ -842,7 +884,7 @@ def plot_kline(
 
     fig.update_layout(
         width=1350,
-        height=620,
+        height=720,
         barmode="stack",
         bargap=0.25,
         hovermode="x unified",
@@ -852,10 +894,19 @@ def plot_kline(
     )
     fig.update_xaxes(type="category", rangeslider=dict(visible=False), row=1, col=1, showticklabels=False)
     fig.update_xaxes(type="category", row=2, col=1, showticklabels=False)
-    fig.update_xaxes(type="category", nticks=8, tickangle=0, row=3, col=1)
+    fig.update_xaxes(type="category", row=3, col=1, showticklabels=False)
+    fig.update_xaxes(type="category", nticks=8, tickangle=0, row=4, col=1)
     fig.update_yaxes(title_text="价格", row=1, col=1)
     fig.update_yaxes(title_text="成交量", row=2, col=1, showgrid=True)
     fig.update_yaxes(title_text="MACD", row=3, col=1, showgrid=True, zeroline=True)
+    fig.update_yaxes(
+        title_text="(C-O)/V",
+        row=4,
+        col=1,
+        showgrid=True,
+        zeroline=True,
+        tickformat=".2e",
+    )
     return fig
 
 def is_holding_stock(code: str):

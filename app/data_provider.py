@@ -221,6 +221,34 @@ class DataProvider:
             self.last_universe_error = f"缩量筛选计算失败 {code}: {exc}"
             return False
 
+    def _passes_close_open_volume_max_filter(self, code: str, lookback_days: int = 30) -> bool:
+        """Return True when the latest (close-open)/volume is the lookback maximum."""
+        try:
+            lookback_days = max(2, int(lookback_days))
+            df = self.get_ohlcv(str(code).zfill(6), lookback_days)
+            required_cols = {"date", "open", "close", "volume"}
+            if df.empty or not required_cols.issubset(df.columns):
+                return False
+
+            tmp = df.copy()
+            tmp["date"] = pd.to_datetime(tmp["date"], errors="coerce")
+            for col in ["open", "close", "volume"]:
+                tmp[col] = pd.to_numeric(tmp[col], errors="coerce")
+            tmp = tmp.dropna(subset=["date", "open", "close", "volume"])
+            tmp = tmp[tmp["volume"] > 0].sort_values("date").tail(lookback_days)
+            if len(tmp) < lookback_days:
+                return False
+
+            values = (tmp["close"] - tmp["open"]) / tmp["volume"]
+            if not np.isfinite(values.to_numpy(dtype=float)).all():
+                return False
+            latest_value = float(values.iloc[-1])
+            previous_max = float(values.iloc[:-1].max())
+            return latest_value >= previous_max
+        except Exception as exc:  # noqa: BLE001
+            self.last_universe_error = f"(Close-Open)/Volume 局部最大值筛选计算失败 {code}: {exc}"
+            return False
+
     def _passes_ema_filter(
         self,
         code: str,
@@ -276,6 +304,8 @@ class DataProvider:
         exclude_st=False,
         use_shrink_volume=False,
         shrink_volume_ratio=2.0 / 3.0,
+        use_close_open_volume_max=False,
+        close_open_volume_max_days=30,
         use_ema_filter=False,
         ema_short_period=20,
         ema_mid_period=50,
@@ -353,6 +383,17 @@ class DataProvider:
         if bool(use_shrink_volume):
             codes = u["code"].astype(str).str.zfill(6).tolist()
             keep_map = {code: self._passes_shrink_volume_filter(code, float(shrink_volume_ratio)) for code in codes}
+            u = u[u["code"].map(keep_map).fillna(False)].copy()
+
+        if bool(use_close_open_volume_max):
+            codes = u["code"].astype(str).str.zfill(6).tolist()
+            keep_map = {
+                code: self._passes_close_open_volume_max_filter(
+                    code,
+                    lookback_days=int(close_open_volume_max_days),
+                )
+                for code in codes
+            }
             u = u[u["code"].map(keep_map).fillna(False)].copy()
 
         if bool(use_ema_filter):
