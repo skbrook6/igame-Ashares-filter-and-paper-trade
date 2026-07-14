@@ -1,5 +1,6 @@
 import json
 from datetime import datetime
+from pathlib import Path
 import yaml
 import pandas as pd
 import plotly.graph_objects as go
@@ -39,6 +40,75 @@ deduplicate_decisions(conn)
 dp = DataProvider(cfg["app"]["sample_data_path"], cfg.get("market_data", {}))
 
 
+FILTER_PRESETS_PATH = Path("data/filter_presets.json")
+DEFAULT_FILTER_PARAMS = {
+    "min_price": 3.0,
+    "max_price": 80.0,
+    "min_pct_chg": -30.0,
+    "max_pct_chg": 30.0,
+    "use_market_cap_filter": False,
+    "min_market_cap_e8": 20.0,
+    "max_market_cap_e8": 5000.0,
+    "exclude_limit_up": True,
+    "exclude_st": True,
+    "excluded_prefix_labels": [],
+    "use_shrink_volume": False,
+    "use_ema_filter": False,
+    "ema_short_period": 20,
+    "ema_mid_period": 50,
+    "ema_long_period": 100,
+    "ema_require_short_above_mid": True,
+    "ema_require_mid_above_long": True,
+    "ema_require_price_above_short": True,
+    "top_n": 0,  # 0 = no limit
+    "sort_by": "成交额从高到低",
+    "force_refresh": False,
+}
+
+
+def normalize_filter_params(params: dict | None) -> dict:
+    merged = DEFAULT_FILTER_PARAMS.copy()
+    if isinstance(params, dict):
+        merged.update({k: v for k, v in params.items() if k in merged})
+    merged["excluded_prefix_labels"] = list(merged.get("excluded_prefix_labels") or [])
+    return merged
+
+
+def load_filter_preset_store() -> dict:
+    if not FILTER_PRESETS_PATH.exists():
+        return {"last_used": DEFAULT_FILTER_PARAMS.copy(), "presets": {}}
+    try:
+        data = json.loads(FILTER_PRESETS_PATH.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return {"last_used": DEFAULT_FILTER_PARAMS.copy(), "presets": {}}
+    presets = data.get("presets", {}) if isinstance(data, dict) else {}
+    if not isinstance(presets, dict):
+        presets = {}
+    return {
+        "last_used": normalize_filter_params(data.get("last_used") if isinstance(data, dict) else None),
+        "presets": {str(k): normalize_filter_params(v) for k, v in presets.items() if isinstance(v, dict)},
+    }
+
+
+def save_filter_preset_store(store: dict):
+    FILTER_PRESETS_PATH.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "last_used": normalize_filter_params(store.get("last_used")),
+        "presets": {
+            str(k): normalize_filter_params(v)
+            for k, v in (store.get("presets") or {}).items()
+            if str(k).strip()
+        },
+    }
+    FILTER_PRESETS_PATH.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def save_last_filter_params(params: dict):
+    store = load_filter_preset_store()
+    store["last_used"] = normalize_filter_params(params)
+    save_filter_preset_store(store)
+
+
 # ---------- session state ----------
 def init_state():
     if "judge_pool" not in st.session_state:
@@ -47,27 +117,16 @@ def init_state():
         st.session_state.judge_idx = 0
     if "position_idx" not in st.session_state:
         st.session_state.position_idx = 0
+    if "non_operation_idx" not in st.session_state:
+        st.session_state.non_operation_idx = 0
     if "kline_offset" not in st.session_state:
         st.session_state.kline_offset = 0
     if "last_code" not in st.session_state:
         st.session_state.last_code = ""
     if "filter_params" not in st.session_state:
-        st.session_state.filter_params = {
-            "min_price": 3.0,
-            "max_price": 80.0,
-            "min_pct_chg": -30.0,
-            "max_pct_chg": 30.0,
-            "use_market_cap_filter": False,
-            "min_market_cap_e8": 20.0,
-            "max_market_cap_e8": 5000.0,
-            "exclude_limit_up": True,
-            "exclude_st": True,
-            "excluded_prefix_labels": [],
-            "use_shrink_volume": False,
-            "top_n": 0,  # 0 = 不限制
-            "sort_by": "成交额从高到低",
-            "force_refresh": False,
-        }
+        st.session_state.filter_params = load_filter_preset_store()["last_used"]
+    if "filter_form_version" not in st.session_state:
+        st.session_state.filter_form_version = 0
     if "hotkeys" not in st.session_state:
         # v5.1 default: A/D shift kline window, W/S prev/next stock, J/K action buttons.
         st.session_state.hotkeys = {
@@ -186,11 +245,33 @@ def reset_paper_dialog():
 
 @st.dialog("生成待判断股票清单")
 def filter_dialog():
-    p = st.session_state.filter_params
+    p = normalize_filter_params(st.session_state.filter_params)
+    st.session_state.filter_params = p
+    form_version = int(st.session_state.get("filter_form_version", 0))
+    def fk(name: str) -> str:
+        return f"filter_{name}_{form_version}"
+
     st.caption("v5.2 使用 TDX 真实股票池。最多股票数填 0 表示不限制；排序方式决定清单顺序。")
 
-    min_price = st.number_input("最低价格", min_value=0.0, value=float(p["min_price"]), step=0.5)
-    max_price = st.number_input("最高价格", min_value=0.0, value=float(p["max_price"]), step=0.5)
+    store = load_filter_preset_store()
+    preset_names = sorted(store.get("presets", {}).keys())
+    if preset_names:
+        preset_col, load_col, delete_col = st.columns([2, 1, 1])
+        selected_preset = preset_col.selectbox("筛选预设", preset_names)
+        if load_col.button("加载预设", use_container_width=True):
+            st.session_state.filter_params = normalize_filter_params(store["presets"][selected_preset])
+            st.session_state.filter_form_version = form_version + 1
+            save_last_filter_params(st.session_state.filter_params)
+            st.rerun()
+        if delete_col.button("删除预设", use_container_width=True):
+            store["presets"].pop(selected_preset, None)
+            save_filter_preset_store(store)
+            st.rerun()
+    else:
+        st.caption("暂无筛选预设；设置好参数后可在下方保存。")
+
+    min_price = st.number_input("最低价格", min_value=0.0, value=float(p["min_price"]), step=0.5, key=fk("min_price"))
+    max_price = st.number_input("最高价格", min_value=0.0, value=float(p["max_price"]), step=0.5, key=fk("max_price"))
 
     st.markdown("**今日涨跌幅筛选（%）**")
     pct_c1, pct_c2 = st.columns(2)
@@ -200,6 +281,7 @@ def filter_dialog():
             value=float(p.get("min_pct_chg", -30.0)),
             step=0.5,
             help="例如 -3 表示今日跌幅不低于 -3%。",
+            key=fk("min_pct_chg"),
         )
     with pct_c2:
         max_pct_chg = st.number_input(
@@ -207,11 +289,13 @@ def filter_dialog():
             value=float(p.get("max_pct_chg", 30.0)),
             step=0.5,
             help="例如 7 表示今日涨幅不高于 7%。",
+            key=fk("max_pct_chg"),
         )
 
     use_market_cap_filter = st.checkbox(
         "启用市值筛选（TDX-only 当前可能无市值，无法获取时会自动跳过）",
         value=bool(p.get("use_market_cap_filter", False)),
+        key=fk("use_market_cap_filter"),
     )
 
     min_mc = st.number_input(
@@ -220,6 +304,7 @@ def filter_dialog():
         value=float(p["min_market_cap_e8"]),
         step=10.0,
         disabled=not use_market_cap_filter,
+        key=fk("min_market_cap_e8"),
     )
     max_mc = st.number_input(
         "最高市值（亿元）",
@@ -227,15 +312,17 @@ def filter_dialog():
         value=float(p["max_market_cap_e8"]),
         step=10.0,
         disabled=not use_market_cap_filter,
+        key=fk("max_market_cap_e8"),
     )
 
-    exclude_limit_up = st.checkbox("排除已涨停股票", value=bool(p.get("exclude_limit_up", True)))
-    exclude_st = st.checkbox("排除 ST / *ST 股票", value=bool(p.get("exclude_st", True)))
+    exclude_limit_up = st.checkbox("排除已涨停股票", value=bool(p.get("exclude_limit_up", True)), key=fk("exclude_limit_up"))
+    exclude_st = st.checkbox("排除 ST / *ST 股票", value=bool(p.get("exclude_st", True)), key=fk("exclude_st"))
     excluded_prefix_labels = st.multiselect(
         "排除特殊板块 / 代码前缀",
         list(BOARD_PREFIX_OPTIONS.keys()),
         default=p.get("excluded_prefix_labels", []),
         help="例如排除 300/301 创业板、688 科创板，或按你的交易范围排除某些代码段。",
+        key=fk("excluded_prefix_labels"),
     )
 
     shrink_ratio = float(st.session_state.indicator_settings.get("shrink_volume_ratio", 2.0 / 3.0))
@@ -243,7 +330,69 @@ def filter_dialog():
         f"筛选缩量：预测成交量 < MA5/MA10 × {shrink_ratio:.2f}",
         value=bool(p.get("use_shrink_volume", False)),
         help="用当前/预测日成交量分别和历史成交量5日、10日均线比较。阈值参数可在 settings 调整。",
+        key=fk("use_shrink_volume"),
     )
+
+    st.markdown("**EMA / EXPMA 筛选**")
+    use_ema_filter = st.checkbox(
+        "启用 EMA 趋势筛选",
+        value=bool(p.get("use_ema_filter", False)),
+        help="按日 K 收盘价计算 EMA。默认条件：短期EMA > 中期EMA，中期EMA > 长期EMA，现价 > 短期EMA。",
+        key=fk("use_ema_filter"),
+    )
+    ema_c1, ema_c2, ema_c3 = st.columns(3)
+    with ema_c1:
+        ema_short_period = st.number_input(
+            "短期 EMA",
+            min_value=1,
+            max_value=250,
+            value=int(p.get("ema_short_period", 20)),
+            step=1,
+            disabled=not use_ema_filter,
+            key=fk("ema_short_period"),
+        )
+    with ema_c2:
+        ema_mid_period = st.number_input(
+            "中期 EMA",
+            min_value=1,
+            max_value=500,
+            value=int(p.get("ema_mid_period", 50)),
+            step=1,
+            disabled=not use_ema_filter,
+            key=fk("ema_mid_period"),
+        )
+    with ema_c3:
+        ema_long_period = st.number_input(
+            "长期 EMA",
+            min_value=1,
+            max_value=1000,
+            value=int(p.get("ema_long_period", 100)),
+            step=1,
+            disabled=not use_ema_filter,
+            key=fk("ema_long_period"),
+        )
+    ema_rule_c1, ema_rule_c2, ema_rule_c3 = st.columns(3)
+    with ema_rule_c1:
+        ema_require_short_above_mid = st.checkbox(
+            "短期 EMA > 中期 EMA",
+            value=bool(p.get("ema_require_short_above_mid", True)),
+            disabled=not use_ema_filter,
+            key=fk("ema_require_short_above_mid"),
+        )
+    with ema_rule_c2:
+        ema_require_mid_above_long = st.checkbox(
+            "中期 EMA > 长期 EMA",
+            value=bool(p.get("ema_require_mid_above_long", True)),
+            disabled=not use_ema_filter,
+            key=fk("ema_require_mid_above_long"),
+        )
+    with ema_rule_c3:
+        ema_require_price_above_short = st.checkbox(
+            "现价 > 短期 EMA",
+            value=bool(p.get("ema_require_price_above_short", True)),
+            disabled=not use_ema_filter,
+            key=fk("ema_require_price_above_short"),
+        )
 
     sort_options = ["成交额从高到低", "价格从高到低", "代码从小到大", "市值从高到低"]
     sort_by = st.selectbox(
@@ -251,6 +400,7 @@ def filter_dialog():
         sort_options,
         index=sort_options.index(p.get("sort_by", "成交额从高到低"))
         if p.get("sort_by", "成交额从高到低") in sort_options else 0,
+        key=fk("sort_by"),
     )
 
     top_n = st.number_input(
@@ -258,49 +408,94 @@ def filter_dialog():
         min_value=0,
         value=int(p.get("top_n", 0)),
         step=50,
+        key=fk("top_n"),
     )
 
     force_refresh = st.checkbox(
         "强制刷新 TDX 股票池缓存",
         value=bool(p.get("force_refresh", False)),
+        key=fk("force_refresh"),
     )
+
+    current_filter_params = {
+        "min_price": min_price,
+        "max_price": max_price,
+        "min_pct_chg": min_pct_chg,
+        "max_pct_chg": max_pct_chg,
+        "use_market_cap_filter": use_market_cap_filter,
+        "min_market_cap_e8": min_mc,
+        "max_market_cap_e8": max_mc,
+        "exclude_limit_up": exclude_limit_up,
+        "exclude_st": exclude_st,
+        "excluded_prefix_labels": excluded_prefix_labels,
+        "use_shrink_volume": use_shrink_volume,
+        "use_ema_filter": use_ema_filter,
+        "ema_short_period": int(ema_short_period),
+        "ema_mid_period": int(ema_mid_period),
+        "ema_long_period": int(ema_long_period),
+        "ema_require_short_above_mid": ema_require_short_above_mid,
+        "ema_require_mid_above_long": ema_require_mid_above_long,
+        "ema_require_price_above_short": ema_require_price_above_short,
+        "top_n": int(top_n),
+        "sort_by": sort_by,
+        "force_refresh": force_refresh,
+    }
+
+    st.markdown("**预设**")
+    preset_name = st.text_input("预设名称", value="我的筛选", key=fk("preset_name"))
+    save_col, last_col = st.columns(2)
+    if save_col.button("保存当前为预设", use_container_width=True):
+        name = preset_name.strip()
+        if not name:
+            st.error("预设名称不能为空。")
+            st.stop()
+        store = load_filter_preset_store()
+        store.setdefault("presets", {})[name] = normalize_filter_params(current_filter_params)
+        store["last_used"] = normalize_filter_params(current_filter_params)
+        save_filter_preset_store(store)
+        st.session_state.filter_params = normalize_filter_params(current_filter_params)
+        st.session_state.filter_form_version = form_version + 1
+        st.success(f"已保存预设：{name}")
+        st.rerun()
+    if last_col.button("保存为下次默认", use_container_width=True):
+        st.session_state.filter_params = normalize_filter_params(current_filter_params)
+        st.session_state.filter_form_version = form_version + 1
+        save_last_filter_params(current_filter_params)
+        st.success("已保存为下次默认筛选。")
+        st.rerun()
 
     c1, c2 = st.columns(2)
     if c1.button("确认生成", type="primary", use_container_width=True):
         excluded_prefixes = [BOARD_PREFIX_OPTIONS[x] for x in excluded_prefix_labels]
-        st.session_state.filter_params = {
-            "min_price": min_price,
-            "max_price": max_price,
-            "min_pct_chg": min_pct_chg,
-            "max_pct_chg": max_pct_chg,
-            "use_market_cap_filter": use_market_cap_filter,
-            "min_market_cap_e8": min_mc,
-            "max_market_cap_e8": max_mc,
-            "exclude_limit_up": exclude_limit_up,
-            "exclude_st": exclude_st,
-            "excluded_prefix_labels": excluded_prefix_labels,
-            "use_shrink_volume": use_shrink_volume,
-            "top_n": int(top_n),
-            "sort_by": sort_by,
-            "force_refresh": force_refresh,
-        }
-        st.session_state.judge_pool = dp.filter_universe(
-            min_price=min_price,
-            max_price=max_price,
-            min_pct_chg=min_pct_chg,
-            max_pct_chg=max_pct_chg,
-            min_market_cap_e8=min_mc,
-            max_market_cap_e8=max_mc,
-            use_market_cap_filter=use_market_cap_filter,
-            exclude_limit_up=exclude_limit_up,
-            exclude_st=exclude_st,
-            excluded_prefixes=excluded_prefixes,
-            use_shrink_volume=use_shrink_volume,
-            shrink_volume_ratio=shrink_ratio,
-            top_n=int(top_n),
-            sort_by=sort_by,
-            force_refresh=force_refresh,
-        )
+        st.session_state.filter_params = normalize_filter_params(current_filter_params)
+        save_last_filter_params(current_filter_params)
+        if use_shrink_volume and int(top_n) <= 0:
+            st.warning("已开启缩量筛选且未限制最多股票数，可能需要几分钟。")
+        with st.spinner("正在生成待判断股票清单，请稍等..."):
+            st.session_state.judge_pool = dp.filter_universe(
+                min_price=min_price,
+                max_price=max_price,
+                min_pct_chg=min_pct_chg,
+                max_pct_chg=max_pct_chg,
+                min_market_cap_e8=min_mc,
+                max_market_cap_e8=max_mc,
+                use_market_cap_filter=use_market_cap_filter,
+                exclude_limit_up=exclude_limit_up,
+                exclude_st=exclude_st,
+                excluded_prefixes=excluded_prefixes,
+                use_shrink_volume=use_shrink_volume,
+                shrink_volume_ratio=shrink_ratio,
+                use_ema_filter=use_ema_filter,
+                ema_short_period=int(ema_short_period),
+                ema_mid_period=int(ema_mid_period),
+                ema_long_period=int(ema_long_period),
+                ema_require_short_above_mid=ema_require_short_above_mid,
+                ema_require_mid_above_long=ema_require_mid_above_long,
+                ema_require_price_above_short=ema_require_price_above_short,
+                top_n=int(top_n),
+                sort_by=sort_by,
+                force_refresh=force_refresh,
+            )
         st.session_state.judge_idx = 0
         st.session_state.kline_offset = 0
         st.rerun()
@@ -1215,9 +1410,6 @@ elif page == "to_operate_list":
 
     if decisions.empty:
         st.info("暂无 BUY / SELL 操作标签。WATCH / HOLD 只用于复盘记录，不进入 to_operate_list。")
-        if not decisions_all.empty:
-            with st.expander("查看非操作标签 WATCH / HOLD"):
-                st.dataframe(decisions_all, use_container_width=True)
     else:
         st.caption("这里只显示 BUY / SELL。WATCH / HOLD 不属于 operation。勾选行后点击删除即可移除对应操作标签。")
 
@@ -1278,6 +1470,120 @@ elif page == "to_operate_list":
             st.success("已执行下单；已删除成交成功的 operation 标签。")
             st.rerun()
 
+    st.markdown("### 非操作标签 WATCH / HOLD")
+    non_operations = (
+        decisions_all[decisions_all["action"].isin(["WATCH", "HOLD"])].copy()
+        if not decisions_all.empty
+        else decisions_all
+    )
+    if non_operations.empty:
+        st.info("暂无 WATCH / HOLD 标签。")
+    else:
+        non_operations = non_operations.reset_index(drop=True)
+        st.caption("点击 WATCH / HOLD 列表中的任意一行，可直接查看该股票 K 线，并可将其转为 BUY。")
+        nonop_selection_event = st.dataframe(
+            non_operations[["id", "code", "name", "action", "reason", "created_at"]],
+            use_container_width=True,
+            hide_index=True,
+            on_select="rerun",
+            selection_mode="single-row",
+            key="non_operation_select_table",
+        )
+
+        selected_nonop_rows = []
+        try:
+            selected_nonop_rows = list(nonop_selection_event.selection.rows)
+        except Exception:
+            try:
+                selected_nonop_rows = list(nonop_selection_event.get("selection", {}).get("rows", []))
+            except Exception:
+                selected_nonop_rows = []
+
+        if selected_nonop_rows:
+            selected_idx = int(selected_nonop_rows[0])
+            if 0 <= selected_idx < len(non_operations):
+                if selected_idx != st.session_state.non_operation_idx:
+                    st.session_state.non_operation_idx = selected_idx
+                    st.session_state.kline_offset = 0
+
+        st.session_state.non_operation_idx = max(0, min(st.session_state.non_operation_idx, len(non_operations) - 1))
+        cur_nonop = non_operations.iloc[st.session_state.non_operation_idx]
+        code = str(cur_nonop["code"]).zfill(6)
+        name = str(cur_nonop["name"])
+        reset_chart_offset_if_code_changed(code)
+        df, max_offset = slice_kline_window(code, 60, 260)
+
+        st.markdown(f"### 观察K线：{code} {name}")
+        if df.empty:
+            st.warning(f"没有找到 {code} {name} 的 K 线数据。")
+        else:
+            chart_col, side_col = st.columns([10, 2])
+            with chart_col:
+                ma_toggle_button("ma_toggle_non_operation")
+                nonop_quote = dp.latest_quote(code)
+                st.plotly_chart(
+                    plot_kline(
+                        df,
+                        code,
+                        show_ma=st.session_state.show_ma,
+                        current_volume=nonop_quote.get("volume_shares"),
+                        estimated_close_volume=dp.estimate_close_volume(code),
+                    ),
+                    use_container_width=False,
+                )
+            with side_col:
+                st.write(f"当前标签：{cur_nonop['action']}")
+                st.write(f"记录时间：{cur_nonop['created_at']}")
+                st.caption("备注/形态理由")
+                st.write(str(cur_nonop.get("reason", "")) or "-")
+                st.divider()
+
+                prev_label = f"previous ({h['previous']})"
+                next_label = f"next ({h['next']})"
+                left_shift_label = f"← older ({h['shift_left']})"
+                right_shift_label = f"newer → ({h['shift_right']})"
+                if st.button(prev_label, use_container_width=True, disabled=(st.session_state.non_operation_idx <= 0), key="nonop_prev"):
+                    st.session_state.non_operation_idx -= 1
+                    st.session_state.kline_offset = 0
+                    st.rerun()
+                if st.button(next_label, use_container_width=True, disabled=(st.session_state.non_operation_idx >= len(non_operations) - 1), key="nonop_next"):
+                    st.session_state.non_operation_idx += 1
+                    st.session_state.kline_offset = 0
+                    st.rerun()
+                st.caption(f"{st.session_state.non_operation_idx + 1}/{len(non_operations)}")
+                st.divider()
+                if st.button(left_shift_label, use_container_width=True, disabled=(st.session_state.kline_offset >= max_offset), key="nonop_shift_left"):
+                    st.session_state.kline_offset += 1
+                    st.rerun()
+                if st.button(right_shift_label, use_container_width=True, disabled=(st.session_state.kline_offset <= 0), key="nonop_shift_right"):
+                    st.session_state.kline_offset -= 1
+                    st.rerun()
+                st.caption(f"offset {st.session_state.kline_offset}/{max_offset}")
+                st.divider()
+
+                buy_reason = st.text_area(
+                    "买入备注/形态理由",
+                    value=str(cur_nonop.get("reason", "")),
+                    key=f"nonop_buy_reason_{int(cur_nonop['id'])}",
+                )
+                buy_label = f"转为买入 BUY ({h['left_action']})"
+                if st.button(buy_label, use_container_width=True, type="primary", key="nonop_buy"):
+                    add_decision(conn, code, name, "BUY", buy_reason)
+                    st.success("已转为 BUY，并加入待操作清单。")
+                    st.rerun()
+
+            inject_hotkeys(
+                {
+                    "previous": prev_label,
+                    "next": next_label,
+                    "shiftLeft": left_shift_label,
+                    "shiftRight": right_shift_label,
+                    "leftAction": buy_label,
+                },
+                hotkey_payload(),
+                newest=(st.session_state.kline_offset <= 0),
+            )
+
 elif page == "visualization":
     st.subheader("visualization：账户与持仓")
     st.caption("已移除账户PnL历史曲线，避免每次打开 visualization 时重建历史导致卡顿。左侧 sidebar 仍显示当前现金与账户当前价值。")
@@ -1287,14 +1593,35 @@ elif page == "visualization":
     if positions.empty:
         st.info("暂无持仓。")
     else:
+        latest_decisions = df_query(
+            conn,
+            """
+            SELECT *
+            FROM decisions
+            WHERE id IN (
+                SELECT MAX(id)
+                FROM decisions
+                GROUP BY code
+            )
+            """,
+        )
+        reason_map = {}
+        action_map = {}
+        if not latest_decisions.empty:
+            latest_decisions["code"] = latest_decisions["code"].astype(str).str.zfill(6)
+            reason_map = latest_decisions.set_index("code")["reason"].fillna("").to_dict()
+            action_map = latest_decisions.set_index("code")["action"].fillna("").to_dict()
+
         rows = []
         for r in positions.itertuples():
+            code_str = str(r.code).zfill(6)
             price = dp.latest_price(r.code)
             pnl = (price - r.avg_cost) * r.shares
             rows.append(
                 {
-                    "code": str(r.code).zfill(6),
+                    "code": code_str,
                     "name": r.name,
+                    "reason": reason_map.get(code_str, ""),
                     "shares": r.shares,
                     "avg_cost": r.avg_cost,
                     "last_price": price,
@@ -1359,6 +1686,16 @@ elif page == "visualization":
             st.write(f"成本：{float(cur['avg_cost']):.2f}")
             st.write(f"现价：{float(cur['last_price']):.2f}")
             st.write(f"市值：{float(cur['market_value']):,.2f}")
+            st.caption(f"当前标签：{action_map.get(code, 'HOLD') or 'HOLD'}")
+            position_reason = st.text_area(
+                "备注/形态理由",
+                value=str(cur.get("reason", "")),
+                key=f"position_reason_{code}_{action_map.get(code, 'HOLD')}",
+            )
+            if st.button("保存备注", use_container_width=True, key=f"save_position_reason_{code}"):
+                add_decision(conn, code, name, action_map.get(code, "HOLD") or "HOLD", position_reason)
+                st.success("已保存备注。")
+                st.rerun()
             st.divider()
             prev_label = f"previous ({h['previous']})"
             next_label = f"next ({h['next']})"

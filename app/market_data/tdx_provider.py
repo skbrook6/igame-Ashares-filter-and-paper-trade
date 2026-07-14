@@ -47,7 +47,7 @@ class TdxDataProvider:
     说明：pytdx quote 成交量字段通常按“手”返回，这里统一转换成“股”。
     """
 
-    def __init__(self, host: str | None = None, port: int = 7709, auto_retry: bool = True):
+    def __init__(self, host: str | None = None, port: int = 7709, auto_retry: bool = True, timeout: float = 1.5):
         try:
             from pytdx.hq import TdxHq_API
         except ImportError as exc:
@@ -56,6 +56,7 @@ class TdxDataProvider:
         self.host = host or None
         self.port = int(port)
         self.auto_retry = auto_retry
+        self.timeout = float(timeout)
         self.api = TdxHq_API(heartbeat=True, auto_retry=auto_retry)
         self.connected_server: tuple[str, int] | None = None
         self._connect()
@@ -71,7 +72,7 @@ class TdxDataProvider:
         last_error = None
         for host, port in servers:
             try:
-                ok = self.api.connect(host, int(port))
+                ok = self.api.connect(host, int(port), time_out=self.timeout)
                 if ok:
                     self.connected_server = (host, int(port))
                     return

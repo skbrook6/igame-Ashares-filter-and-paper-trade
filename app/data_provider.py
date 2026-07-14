@@ -61,6 +61,7 @@ class DataProvider:
                 host=host,
                 port=int(cfg.get("port", 7709)),
                 auto_retry=bool(cfg.get("auto_retry", True)),
+                timeout=float(cfg.get("timeout", 1.5)),
             )
             self.provider_status = f"tdx {self.tdx.connected_server}"
         except Exception as exc:  # noqa: BLE001
@@ -220,6 +221,47 @@ class DataProvider:
             self.last_universe_error = f"缩量筛选计算失败 {code}: {exc}"
             return False
 
+    def _passes_ema_filter(
+        self,
+        code: str,
+        short_period: int = 20,
+        mid_period: int = 50,
+        long_period: int = 100,
+        require_short_above_mid: bool = True,
+        require_mid_above_long: bool = True,
+        require_price_above_short: bool = True,
+    ) -> bool:
+        try:
+            short_period = max(1, int(short_period))
+            mid_period = max(1, int(mid_period))
+            long_period = max(1, int(long_period))
+            fetch_n = max(short_period, mid_period, long_period) * 4
+            fetch_n = max(fetch_n, max(short_period, mid_period, long_period) + 20)
+
+            df = self.get_ohlcv(str(code).zfill(6), fetch_n)
+            if df.empty or "close" not in df.columns:
+                return False
+
+            close = pd.to_numeric(df["close"], errors="coerce").dropna()
+            if len(close) < max(short_period, mid_period, long_period):
+                return False
+
+            ema_short = float(close.ewm(span=short_period, adjust=False).mean().iloc[-1])
+            ema_mid = float(close.ewm(span=mid_period, adjust=False).mean().iloc[-1])
+            ema_long = float(close.ewm(span=long_period, adjust=False).mean().iloc[-1])
+            latest_price = float(close.iloc[-1])
+
+            if bool(require_short_above_mid) and not (ema_short > ema_mid):
+                return False
+            if bool(require_mid_above_long) and not (ema_mid > ema_long):
+                return False
+            if bool(require_price_above_short) and not (latest_price > ema_short):
+                return False
+            return True
+        except Exception as exc:  # noqa: BLE001
+            self.last_universe_error = f"EMA筛选计算失败 {code}: {exc}"
+            return False
+
     def filter_universe(
         self,
         min_price=0.0,
@@ -234,6 +276,13 @@ class DataProvider:
         exclude_st=False,
         use_shrink_volume=False,
         shrink_volume_ratio=2.0 / 3.0,
+        use_ema_filter=False,
+        ema_short_period=20,
+        ema_mid_period=50,
+        ema_long_period=100,
+        ema_require_short_above_mid=True,
+        ema_require_mid_above_long=True,
+        ema_require_price_above_short=True,
         top_n=0,
         sort_by="成交额从高到低",
         force_refresh=False,
@@ -275,11 +324,6 @@ class DataProvider:
             else:
                 u = u[~u.apply(self._is_limit_up_row, axis=1)].copy()
 
-        if bool(use_shrink_volume):
-            codes = u["code"].astype(str).str.zfill(6).tolist()
-            keep_map = {code: self._passes_shrink_volume_filter(code, float(shrink_volume_ratio)) for code in codes}
-            u = u[u["code"].map(keep_map).fillna(False)].copy()
-
         if bool(use_market_cap_filter) and self.has_valid_market_cap(u):
             min_mc = float(min_market_cap_e8) * 1e8
             max_mc = float(max_market_cap_e8) * 1e8
@@ -305,6 +349,27 @@ class DataProvider:
 
         if int(top_n) > 0:
             u = u.head(int(top_n))
+
+        if bool(use_shrink_volume):
+            codes = u["code"].astype(str).str.zfill(6).tolist()
+            keep_map = {code: self._passes_shrink_volume_filter(code, float(shrink_volume_ratio)) for code in codes}
+            u = u[u["code"].map(keep_map).fillna(False)].copy()
+
+        if bool(use_ema_filter):
+            codes = u["code"].astype(str).str.zfill(6).tolist()
+            keep_map = {
+                code: self._passes_ema_filter(
+                    code,
+                    short_period=int(ema_short_period),
+                    mid_period=int(ema_mid_period),
+                    long_period=int(ema_long_period),
+                    require_short_above_mid=bool(ema_require_short_above_mid),
+                    require_mid_above_long=bool(ema_require_mid_above_long),
+                    require_price_above_short=bool(ema_require_price_above_short),
+                )
+                for code in codes
+            }
+            u = u[u["code"].map(keep_map).fillna(False)].copy()
 
         return u.reset_index(drop=True)
 

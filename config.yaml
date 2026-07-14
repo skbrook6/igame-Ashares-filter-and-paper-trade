@@ -20,6 +20,7 @@ market_data:
     host: "180.153.18.170"
     port: 7709
     auto_retry: true
+    timeout: 1.5
 
 paper_trading:
   initial_cash: 1000000
