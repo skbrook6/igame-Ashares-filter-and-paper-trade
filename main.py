@@ -141,6 +141,10 @@ def init_state():
         }
     if "show_ma" not in st.session_state:
         st.session_state.show_ma = True
+    if "dark_mode" not in st.session_state:
+        st.session_state.dark_mode = False
+    if "active_page" not in st.session_state:
+        st.session_state.active_page = "K-lines-gamer"
     if "chart_colors" not in st.session_state:
         # A-share default: red = up / profit, green = down / loss.
         st.session_state.chart_colors = {
@@ -157,6 +161,109 @@ def init_state():
 
 
 init_state()
+
+
+def apply_app_theme():
+    """Apply the optional in-app dark palette to Streamlit UI elements."""
+    if not st.session_state.dark_mode:
+        return
+    st.markdown(
+        """
+        <style>
+        :root { color-scheme: dark; }
+        .stApp,
+        [data-testid="stAppViewContainer"] {
+            background-color: #0e1117;
+            color: #e6edf3;
+        }
+        [data-testid="stHeader"] {
+            background-color: rgba(14, 17, 23, 0.94);
+        }
+        [data-testid="stSidebar"] {
+            background-color: #111827;
+        }
+        .stApp h1, .stApp h2, .stApp h3,
+        .stApp h4, .stApp h5, .stApp h6,
+        [data-testid="stMarkdownContainer"],
+        [data-testid="stCaptionContainer"],
+        [data-testid="stMetricLabel"],
+        [data-testid="stMetricValue"] {
+            color: #e6edf3;
+        }
+        [data-testid="stMetricDelta"] {
+            color: #3fb950 !important;
+        }
+        [data-testid="stTextInput"] input,
+        [data-testid="stNumberInput"] input,
+        [data-testid="stTextArea"] textarea,
+        [data-baseweb="select"] > div {
+            background-color: #161b22;
+            color: #e6edf3;
+            border-color: #30363d;
+        }
+        [data-testid="stBaseButton-secondary"] {
+            background-color: #161b22;
+            color: #e6edf3;
+            border-color: #30363d;
+        }
+        [data-testid="stBaseButton-secondary"]:hover {
+            background-color: #21262d;
+            border-color: #58a6ff;
+            color: #ffffff;
+        }
+        [data-testid="stDataFrame"],
+        [data-testid="stTable"] {
+            background-color: #161b22;
+            border-color: #30363d;
+        }
+        .stDataFrameGlideDataEditor {
+            filter: invert(0.88) hue-rotate(180deg);
+        }
+        [data-testid="stDataFrame"] [data-testid="stElementToolbarButtonContainer"],
+        [data-testid="stDataEditor"] [data-testid="stElementToolbarButtonContainer"] {
+            background-color: #161b22;
+            color: #e6edf3;
+        }
+        [data-testid="stJson"] .react-json-view {
+            background-color: #ffffff !important;
+            filter: invert(0.88) hue-rotate(180deg);
+            border: 1px solid #d4d4d4;
+            border-radius: 0.35rem;
+        }
+        [data-testid="stDialog"] > div,
+        [data-testid="stPopoverBody"] {
+            background-color: #161b22;
+            color: #e6edf3;
+        }
+        hr {
+            border-color: #30363d !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def toggle_dark_mode():
+    st.session_state.dark_mode = not st.session_state.dark_mode
+
+
+def plotly_theme_colors() -> dict:
+    if st.session_state.get("dark_mode", False):
+        return {
+            "background": "#0e1117",
+            "text": "#e6edf3",
+            "grid": "#273142",
+            "axis": "#4b5563",
+            "hover": "#161b22",
+        }
+    return {
+        "background": "#ffffff",
+        "text": "#31333f",
+        "grid": "#e5e7eb",
+        "axis": "#d1d5db",
+        "hover": "#ffffff",
+    }
 
 
 BOARD_PREFIX_OPTIONS = {
@@ -533,6 +640,30 @@ def get_current_pool(keyword: str):
     return dp.search(keyword), False
 
 
+def selected_dataframe_row(event) -> int | None:
+    """Return the row index selected through any data cell (or a row fallback)."""
+    try:
+        selection = event.selection
+    except Exception:
+        try:
+            selection = event.get("selection", {})
+        except Exception:
+            return None
+
+    try:
+        cells = list(selection.cells)
+    except Exception:
+        cells = list(selection.get("cells", [])) if isinstance(selection, dict) else []
+    if cells:
+        return int(cells[0][0])
+
+    try:
+        rows = list(selection.rows)
+    except Exception:
+        rows = list(selection.get("rows", [])) if isinstance(selection, dict) else []
+    return int(rows[0]) if rows else None
+
+
 def slice_kline_window(code: str, window: int = 60, fetch_n: int = 260):
     """Fetch enough bars, calculate MA on the full raw series, then slice the visible 60 bars.
 
@@ -631,6 +762,7 @@ def plot_kline(
     """
     up_color = st.session_state.chart_colors.get("up", "#e74c3c")
     down_color = st.session_state.chart_colors.get("down", "#2ecc71")
+    theme = plotly_theme_colors()
 
     df_plot = df.copy()
     df_plot["date"] = pd.to_datetime(df_plot["date"])
@@ -888,9 +1020,12 @@ def plot_kline(
         barmode="stack",
         bargap=0.25,
         hovermode="x unified",
-        hoverlabel=dict(align="left"),
+        hoverlabel=dict(align="left", bgcolor=theme["hover"], font=dict(color=theme["text"])),
         margin=dict(l=20, r=20, t=20, b=30),
         legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
+        paper_bgcolor=theme["background"],
+        plot_bgcolor=theme["background"],
+        font=dict(color=theme["text"]),
     )
     fig.update_xaxes(type="category", rangeslider=dict(visible=False), row=1, col=1, showticklabels=False)
     fig.update_xaxes(type="category", row=2, col=1, showticklabels=False)
@@ -906,6 +1041,18 @@ def plot_kline(
         showgrid=True,
         zeroline=True,
         tickformat=".2e",
+    )
+    fig.update_xaxes(
+        gridcolor=theme["grid"],
+        linecolor=theme["axis"],
+        zerolinecolor=theme["axis"],
+        tickfont=dict(color=theme["text"]),
+    )
+    fig.update_yaxes(
+        gridcolor=theme["grid"],
+        linecolor=theme["axis"],
+        zerolinecolor=theme["axis"],
+        tickfont=dict(color=theme["text"]),
     )
     return fig
 
@@ -949,13 +1096,14 @@ def style_pnl_table(df: pd.DataFrame):
             return f"color: {up_color}; font-weight: 700" if x >= 0 else f"color: {down_color}; font-weight: 700"
         except Exception:
             return ""
-    return df.style.format({
+    styled = df.style.format({
         "avg_cost": "{:.2f}",
         "last_price": "{:.2f}",
         "market_value": "{:,.2f}",
         "pnl": "{:,.2f}",
         "pnl_pct": "{:.2%}",
-    }).map(color_pnl, subset=["pnl", "pnl_pct"])
+    })
+    return styled.map(color_pnl, subset=["pnl", "pnl_pct"])
 
 
 def _price_series_for_code(code: str, start_date, end_date):
@@ -1137,6 +1285,7 @@ def plot_account_pnl_curve(equity_df: pd.DataFrame):
     """Daily account-level PnL curve since the latest paper-account reset."""
     up_color = st.session_state.chart_colors.get("up", "#e74c3c")
     down_color = st.session_state.chart_colors.get("down", "#2ecc71")
+    theme = plotly_theme_colors()
     df = equity_df.copy()
     if df.empty:
         return go.Figure()
@@ -1171,9 +1320,25 @@ def plot_account_pnl_curve(equity_df: pd.DataFrame):
         margin=dict(l=20, r=20, t=20, b=30),
         hovermode="x unified",
         showlegend=False,
+        paper_bgcolor=theme["background"],
+        plot_bgcolor=theme["background"],
+        font=dict(color=theme["text"]),
+        hoverlabel=dict(bgcolor=theme["hover"], font=dict(color=theme["text"])),
     )
-    fig.update_xaxes(title_text="日期", nticks=8)
-    fig.update_yaxes(title_text="账户PnL")
+    fig.update_xaxes(
+        title_text="日期",
+        nticks=8,
+        gridcolor=theme["grid"],
+        linecolor=theme["axis"],
+        tickfont=dict(color=theme["text"]),
+    )
+    fig.update_yaxes(
+        title_text="账户PnL",
+        gridcolor=theme["grid"],
+        linecolor=theme["axis"],
+        zerolinecolor=theme["axis"],
+        tickfont=dict(color=theme["text"]),
+    )
     return fig
 
 
@@ -1267,10 +1432,26 @@ def hotkey_payload():
     }
 
 
-st.title("K-lines Gamer：主观K线训练 + 自动委托 MVP")
+apply_app_theme()
+title_col, theme_col = st.columns([8, 1], vertical_alignment="center")
+with title_col:
+    st.title("K-lines Gamer：主观K线训练 + 自动委托 MVP")
+with theme_col:
+    theme_label = "☀️ 日间" if st.session_state.dark_mode else "🌙 夜间"
+    st.button(
+        theme_label,
+        key="theme_toggle",
+        use_container_width=True,
+        help="切换页面显示模式",
+        on_click=toggle_dark_mode,
+    )
 st.caption("当前版本默认 paper trading；真实下单请接入正式券商 API，并增加风控、权限、审计。")
 
-page = st.sidebar.radio("模块", ["K-lines-gamer", "to_operate_list", "visualization", "trading_log", "settings"])
+page = st.sidebar.radio(
+    "模块",
+    ["K-lines-gamer", "to_operate_list", "visualization", "trading_log", "settings"],
+    key="active_page",
+)
 
 cash_now = get_cash(conn)
 total_value, stock_value = account_total_value()
@@ -1517,7 +1698,10 @@ elif page == "to_operate_list":
             pusher = OrderPusher(conn, broker)
             results = pusher.push(suggestions)
             clear_operation_decisions_for_results(conn, results)
-            st.dataframe(pd.DataFrame([r.__dict__ for r in results]), use_container_width=True)
+            st.dataframe(
+                pd.DataFrame([r.__dict__ for r in results]),
+                use_container_width=True,
+            )
             st.success("已执行下单；已删除成交成功的 operation 标签。")
             st.rerun()
 
@@ -1537,21 +1721,12 @@ elif page == "to_operate_list":
             use_container_width=True,
             hide_index=True,
             on_select="rerun",
-            selection_mode="single-row",
+            selection_mode="single-cell",
             key="non_operation_select_table",
         )
 
-        selected_nonop_rows = []
-        try:
-            selected_nonop_rows = list(nonop_selection_event.selection.rows)
-        except Exception:
-            try:
-                selected_nonop_rows = list(nonop_selection_event.get("selection", {}).get("rows", []))
-            except Exception:
-                selected_nonop_rows = []
-
-        if selected_nonop_rows:
-            selected_idx = int(selected_nonop_rows[0])
+        selected_idx = selected_dataframe_row(nonop_selection_event)
+        if selected_idx is not None:
             if 0 <= selected_idx < len(non_operations):
                 if selected_idx != st.session_state.non_operation_idx:
                     st.session_state.non_operation_idx = selected_idx
@@ -1688,22 +1863,14 @@ elif page == "visualization":
         selection_event = st.dataframe(
             style_pnl_table(pos_df),
             use_container_width=True,
+            hide_index=True,
             on_select="rerun",
-            selection_mode="single-row",
+            selection_mode="single-cell",
             key="positions_select_table",
         )
 
-        selected_rows = []
-        try:
-            selected_rows = list(selection_event.selection.rows)
-        except Exception:
-            try:
-                selected_rows = list(selection_event.get("selection", {}).get("rows", []))
-            except Exception:
-                selected_rows = []
-
-        if selected_rows:
-            selected_idx = int(selected_rows[0])
+        selected_idx = selected_dataframe_row(selection_event)
+        if selected_idx is not None:
             if 0 <= selected_idx < len(pos_df):
                 if selected_idx != st.session_state.position_idx:
                     st.session_state.position_idx = selected_idx

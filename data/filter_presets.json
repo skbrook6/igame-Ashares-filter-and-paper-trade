@@ -2,7 +2,7 @@
   "last_used": {
     "min_price": 3.0,
     "max_price": 100.0,
-    "min_pct_chg": -10.0,
+    "min_pct_chg": 0.0,
     "max_pct_chg": 15.0,
     "use_market_cap_filter": false,
     "min_market_cap_e8": 20.0,
@@ -12,7 +12,7 @@
     "excluded_prefix_labels": [],
     "use_shrink_volume": false,
     "use_close_open_volume_max": true,
-    "close_open_volume_max_days": 5,
+    "close_open_volume_max_days": 30,
     "use_ema_filter": true,
     "ema_short_period": 20,
     "ema_mid_period": 50,
